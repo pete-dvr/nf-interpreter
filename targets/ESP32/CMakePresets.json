@@ -300,6 +300,17 @@
             }
         },
         {
+            "name": "PRODUCT_S3_OTA",
+            "displayName": "Seadragon ESP32-S3 N16R8 paired OTA",
+            "inherits": "ESP32_S3_OCTAL",
+            "binaryDir": "${sourceDir}/build/product_s3_ota",
+            "cacheVariables": {
+                "TARGET_NAME": "${presetName}",
+                "NF_TARGET_DEFCONFIG": "targets/ESP32/defconfig/PRODUCT_S3_OTA_defconfig",
+                "NF_INTEROP_ASSEMBLIES": "Product.Firmware"
+            }
+        },
+        {
             "name": "ESP32_S3_OCTAL_CAM",
             "inherits": [
                 "xtensa-esp32s3-preset",
@@ -548,6 +559,11 @@
         }
     ],
     "buildPresets": [
+        {
+            "name": "PRODUCT_S3_OTA",
+            "displayName": "Seadragon ESP32-S3 N16R8 paired OTA",
+            "configurePreset": "PRODUCT_S3_OTA"
+        },
         {
             "inherits": "base-user",
             "name": "ESP32_PSRAM_REV0",

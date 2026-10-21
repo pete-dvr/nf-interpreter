@@ -13,6 +13,22 @@ config SDK_CONFIG_FILE
       Relative path to the IDF sdkconfig defaults file.
       Leave empty to use targets/ESP32/_IDF/sdkconfig.default.
 
+config NF_FEATURE_PRODUCT_OTA
+    bool "Product paired runtime and managed application OTA"
+    default n
+    depends on TARGET_SERIES = "ESP32_S3"
+    help
+      Requires the fixed product 16 MiB layout, a generated managed release
+      descriptor, and the Product.Firmware managed interop assembly.
+
+config NF_PRODUCT_OTA_REQUIRE_SIGNATURE
+    bool "Require a pinned P-256 signature for product OTA packages"
+    depends on NF_FEATURE_PRODUCT_OTA
+    default y
+    help
+      Disable only in an explicitly identified development build.
+      Production builds must supply NF_PRODUCT_PUBLIC_KEY at configure time.
+
 config ESP32_RESERVE_SPIRAM_IDF_ALLOCATION_BYTES
     int "SPIRAM reserved for IDF allocation (bytes)"
     default 262144

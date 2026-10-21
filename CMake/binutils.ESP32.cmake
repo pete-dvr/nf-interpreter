@@ -420,6 +420,24 @@ macro(nf_setup_partition_tables_generator)
     # create command line for partition table generator
     set(gen_partition_table "python" "${ESP32_PARTITION_TABLE_UTILITY}")
 
+    if(NF_FEATURE_PRODUCT_OTA)
+        add_custom_command(TARGET ${NANOCLR_PROJECT_NAME}.elf POST_BUILD
+            COMMAND ${gen_partition_table} --flash-size 16MB
+                ${CMAKE_SOURCE_DIR}/targets/ESP32/_IDF/esp32s3/partitions_product_ota_16mb.csv
+                ${CMAKE_BINARY_DIR}/partitions_product_ota_16mb.bin
+            COMMENT "Generate product OTA layout 2 partition table"
+            VERBATIM)
+        # ESP-IDF generates .bin after linking .elf. A linker POST_BUILD check
+        # would inspect a missing or stale binary instead of the current image.
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_custom_target(product_ota_image_check ALL
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/product_ota/product_ota.py"
+                check-runtime --runtime "${CMAKE_BINARY_DIR}/${NANOCLR_PROJECT_NAME}.bin"
+            DEPENDS gen_project_binary
+            COMMENT "Validate final product OTA image capacity"
+            VERBATIM)
+        add_dependencies(app product_ota_image_check)
+    else()
     if(${TARGET_SERIES_SHORT} STREQUAL "esp32" OR 
        ${TARGET_SERIES_SHORT} STREQUAL "esp32c3" OR 
        ${TARGET_SERIES_SHORT} STREQUAL "esp32c5" OR 
@@ -488,6 +506,7 @@ macro(nf_setup_partition_tables_generator)
             ${CMAKE_SOURCE_DIR}/targets/ESP32/_IDF/esp32/partitions_nanoclr_2mb.csv
             ${CMAKE_BINARY_DIR}/partitions_2mb.bin
             COMMENT "Generate partition table for 2MB flash" )
+    endif()
     endif()
 
 endmacro()
@@ -660,7 +679,7 @@ macro(nf_add_idf_as_library)
     )
 
     # Make temporary copy of sdkconfig.defaults.? file into build dir as we are going to make changes
-    set(SDKCONFIG_DEFAULTS_TEMP_FILE ${CMAKE_SOURCE_DIR}/build/sdkconfig.default)
+    set(SDKCONFIG_DEFAULTS_TEMP_FILE ${CMAKE_BINARY_DIR}/sdkconfig.default)
     file(WRITE ${SDKCONFIG_DEFAULTS_TEMP_FILE} ${SDKCONFIG_ORIGINAL_CONTENTS})
 
     # set list with the IDF components to add
@@ -694,6 +713,11 @@ macro(nf_add_idf_as_library)
         idf::esp_adc
         idf::littlefs
     )
+
+    if(NF_FEATURE_PRODUCT_OTA)
+        list(APPEND IDF_COMPONENTS_TO_ADD app_update bootloader_support)
+        list(APPEND IDF_LIBRARIES_TO_ADD idf::app_update idf::bootloader_support)
+    endif()
 
     # Needed for remote Wifi module on P4 boards
     if(${TARGET_SERIES_SHORT} STREQUAL "esp32p4")
@@ -870,16 +894,48 @@ macro(nf_add_idf_as_library)
         )
     endif()
 
+    # Product builds have a separate SDK config so an earlier stock 4MB build
+    # cannot silently select the wrong flash layout.
+    set(_nf_sdkconfig_path "${CMAKE_SOURCE_DIR}/sdkconfig")
+    if(NF_FEATURE_PRODUCT_OTA)
+        set(_nf_sdkconfig_path "${CMAKE_BINARY_DIR}/sdkconfig")
+    endif()
     # create IDF static libraries
     idf_build_process(${TARGET_SERIES_SHORT}
         COMPONENTS 
             ${IDF_COMPONENTS_TO_ADD}
         SDKCONFIG_DEFAULTS
             ${SDKCONFIG_DEFAULTS_TEMP_FILE}
+        SDKCONFIG "${_nf_sdkconfig_path}"
         PROJECT_NAME "nanoCLR"
         PROJECT_VER ${BUILD_VERSION}
         PROJECT_DIR ${CMAKE_SOURCE_DIR}
     )
+
+    if(NF_FEATURE_PRODUCT_OTA)
+        file(STRINGS "${_nf_sdkconfig_path}" _product_sdkconfig)
+        foreach(_required
+            "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y"
+            "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y"
+            "CONFIG_SPIRAM_MODE_OCT=y"
+            "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"targets/ESP32/_IDF/esp32s3/partitions_product_ota_16mb.csv\"")
+            if(NOT _required IN_LIST _product_sdkconfig)
+                message(FATAL_ERROR "Product SDK configuration mismatch: ${_required}. Use a clean product build.")
+            endif()
+        endforeach()
+        if("CONFIG_ESPTOOLPY_OCT_FLASH=y" IN_LIST _product_sdkconfig)
+            message(FATAL_ERROR "The N16R8 product has Quad flash; Octal flash must be disabled.")
+        endif()
+        set(NF_PRODUCT_CONFIG_DIRECTORY "" CACHE PATH
+            "Explicit provisioning seed directory; empty disables filesystem image generation")
+        if(NOT NF_PRODUCT_CONFIG_DIRECTORY STREQUAL "")
+            if(NOT IS_DIRECTORY "${NF_PRODUCT_CONFIG_DIRECTORY}")
+                message(FATAL_ERROR "NF_PRODUCT_CONFIG_DIRECTORY must be an existing provisioning directory.")
+            endif()
+            include("${CMAKE_SOURCE_DIR}/CMake/Modules/NF_ProductOtaLittlefs.cmake")
+            nf_product_ota_create_config_image("${NF_PRODUCT_CONFIG_DIRECTORY}")
+        endif()
+    endif()
 
     if(API_nanoFramework.Esp32.Camera)
         idf_build_get_property(IDF_SDKCONFIG_FILE SDKCONFIG)
@@ -1002,7 +1058,7 @@ macro(nf_add_idf_as_library)
 
     # need to read the supplied SDK CONFIG file        
     file(READ
-        ${CMAKE_SOURCE_DIR}/sdkconfig
+        ${_nf_sdkconfig_path}
         SDKCONFIG_DEFAULT_CONTENTS)
 
     # find out if there is support for PSRAM

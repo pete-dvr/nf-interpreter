@@ -30,6 +30,7 @@ InteropAssemblies/*
 
 # ignore CMake modules for Interop assemblies
 CMake/Modules/FindINTEROP*.cmake
+!CMake/Modules/FindINTEROP-Product.Firmware.cmake
 
 # Visual Studio
 ## Ignore Visual Studio temporary files, build results, and

@@ -1,0 +1,62 @@
+name: product-ota
+
+on:
+  push:
+    paths:
+      - "tools/product_ota/**"
+      - "targets/ESP32/**"
+      - "CMake/Modules/NF_ProductOta.cmake"
+      - "CMake/Modules/NF_ProductOtaLittlefs.cmake"
+      - "CMake/Modules/FindINTEROP-Product.Firmware.cmake"
+      - "CMake/binutils.ESP32.cmake"
+      - "scripts/validate_defconfigs.py"
+      - ".github/workflows/product-ota.yml"
+  pull_request:
+    paths:
+      - "tools/product_ota/**"
+      - "targets/ESP32/**"
+      - "CMake/Modules/NF_ProductOta.cmake"
+      - "CMake/Modules/NF_ProductOtaLittlefs.cmake"
+      - "CMake/Modules/FindINTEROP-Product.Firmware.cmake"
+      - "CMake/binutils.ESP32.cmake"
+      - "scripts/validate_defconfigs.py"
+      - ".github/workflows/product-ota.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            tools/product_ota/requirements.txt
+            tools/product_ota/test-requirements.txt
+      - name: Install host test dependencies
+        run: python -m pip install -r tools/product_ota/test-requirements.txt kconfiglib
+      - name: Verify package, signing, descriptor and corruption behavior
+        run: python -m unittest discover -s tools/product_ota -p 'test_*.py' -v
+      - name: Validate fixed product partition layout
+        run: >-
+          python tools/product_ota/product_ota.py check-layout
+          --csv targets/ESP32/_IDF/esp32s3/partitions_product_ota_16mb.csv
+      - name: Validate product configuration
+        run: python scripts/validate_defconfigs.py --target PRODUCT_S3_OTA --verbose
+      - name: Compile device parser and CRC tests on host
+        run: >-
+          c++ -std=c++11 -Wall -Wextra -Werror -Itargets/ESP32/_include
+          tools/product_ota/test_native_parser.cpp -o /tmp/product_ota_parser_tests
+      - name: Test device parser and CRC contract
+        run: /tmp/product_ota_parser_tests
+      - name: Install native fault-injection test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libssl-dev
+      - name: Exercise actual native installer with injected SDK faults
+        run: python tools/product_ota/native_tests/run.py

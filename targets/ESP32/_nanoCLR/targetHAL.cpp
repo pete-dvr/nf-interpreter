@@ -13,6 +13,9 @@
 #include <nanoHAL_ConfigurationManager.h>
 #include <nanoHAL_StorageOperation.h>
 #include <nanoHAL_Graphics.h>
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+#include <ProductFirmwareUpdate.h>
+#endif
 #if (HAL_USE_UART == TRUE)
 #include <sys_io_ser_native_target.h>
 #endif
@@ -66,6 +69,17 @@ extern "C"
 
 void nanoHAL_Initialize()
 {
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+    // Debugger deployment can change assemblies between CLR soft reboots.
+    // Apply the configured pair-validation policy before every deployment scan;
+    // only the explicit VS development mode relaxes managed hash/tail checks.
+    esp_err_t pairResult = ProductOta_ValidateRunningPair();
+    if (pairResult != ESP_OK)
+    {
+        ProductOta_FailBoot(pairResult);
+    }
+#endif
+
     HAL_CONTINUATION::InitializeList();
     HAL_COMPLETION ::InitializeList();
 
@@ -134,6 +148,12 @@ void nanoHAL_Initialize()
 void nanoHAL_Uninitialize(bool isPoweringDown)
 {
     (void)isPoweringDown;
+
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+    // Quiesce the writer before any reboot handler can close files, unmount
+    // storage or change deployment mappings. Trial reboots must use the bootloader.
+    ProductOta_PrepareSoftReboot();
+#endif
 
     // check for s_rebootHandlers
     for (unsigned int i = 0; i < ARRAYSIZE(s_rebootHandlers); i++)

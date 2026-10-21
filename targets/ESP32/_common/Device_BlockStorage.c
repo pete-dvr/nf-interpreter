@@ -8,6 +8,10 @@
 
 #include <esp32_idf.h>
 #include <esp_partition.h>
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+#include <esp_ota_ops.h>
+#include <ProductFirmwareUpdate.h>
+#endif
 
 #include <Target_BlockStorage_Esp32FlashDriver.h>
 
@@ -139,7 +143,11 @@ void FixUpBlockRegionInfo()
 {
     // nanoCLR
     const esp_partition_t *part_nanoClr =
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+        esp_ota_get_running_partition();
+#else
         esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, 0);
+#endif
     if (part_nanoClr)
     {
         BlockRegions[0].Start = part_nanoClr->address;
@@ -148,7 +156,15 @@ void FixUpBlockRegionInfo()
 
     // Deployment
     const esp_partition_t *part_deploy =
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+        ProductOta_GetDeploymentPartition(part_nanoClr);
+    if (part_deploy == NULL)
+    {
+        ProductOta_FailBoot(ESP_ERR_INVALID_STATE);
+    }
+#else
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NANOCLR, 0);
+#endif
     if (part_deploy)
     {
         BlockRegions[1].Start = part_deploy->address;
@@ -157,7 +173,11 @@ void FixUpBlockRegionInfo()
 
     // Config
     const esp_partition_t *part_config =
-        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0);
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, "config");
+#else
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, NULL);
+#endif
     if (part_config)
     {
         BlockRegions[2].Start = part_config->address;

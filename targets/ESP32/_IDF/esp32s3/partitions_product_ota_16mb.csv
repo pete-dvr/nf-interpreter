@@ -1,0 +1,10 @@
+# Product PR-S3-N16R8-01, layoutId 2. Ordinary OTA must never replace this table.
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+phy_init, data, phy,     0xF000,   0x1000
+ota_0,    app,  ota_0,   0x10000,  0x1A0000
+ota_1,    app,  ota_1,   0x1B0000, 0x1A0000
+deploy_a, data, 0x84,    0x350000, 0x2E0000
+deploy_b, data, 0x84,    0x630000, 0x2E0000
+otadata,  data, ota,     0x910000, 0x2000
+config,   data, littlefs,0x912000, 0x6EE000

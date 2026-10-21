@@ -5,6 +5,10 @@
 
 #include <nanoPAL_BlockStorage.h>
 #include <Target_BlockStorage_Esp32FlashDriver.h>
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+#include <esp_ota_ops.h>
+#include <ProductFirmwareUpdate.h>
+#endif
 
 const DRAM_ATTR esp_partition_t *g_pFlashDriver_partition;
 const void *esp32_flash_start_ptr;
@@ -55,7 +59,11 @@ bool Esp32FlashDriver_InitializeDevice(void *context)
 
     // Find the application partition and save partition entry
     g_pFlashDriver_partition =
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+        ProductOta_GetDeploymentPartition(esp_ota_get_running_partition());
+#else
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NANOCLR, NULL);
+#endif
     if (g_pFlashDriver_partition == NULL)
     {
         ESP_LOGE(TAG, "InitializeDevice failed\n");

@@ -6,6 +6,9 @@
 #include "targetHAL_ConfigStorage.h"
 #include <esp_vfs.h>
 #include <esp_littlefs.h>
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+#include <ProductFirmwareUpdate.h>
+#endif
 
 // this one is following the the same "drive letter" as the HAL Windows Storage INTERNAL_DRIVE0_LETTER
 #define NANO_LITTLEFS_BASE_PATH   "/I"
@@ -29,11 +32,19 @@ void ConfigStorage_Initialise()
     esp_vfs_littlefs_conf_t conf = {
         .base_path = NANO_LITTLEFS_BASE_PATH,
         .partition_label = LITTLEFS_PARTITION_LABEL,
-        .format_if_mount_failed = true,
+        // Product storage is shared by both releases. Formatting is an explicit
+        // provisioning operation, never a response to a failed field mount.
+        .format_if_mount_failed = !CONFIG_NF_FEATURE_PRODUCT_OTA,
         .dont_mount = false};
 
     ret = esp_vfs_littlefs_register(&conf);
 
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
+    {
+        ProductOta_FailBoot(ret);
+    }
+#endif
     if (ret != ESP_OK)
     {
         if (ret == ESP_FAIL)
@@ -57,6 +68,12 @@ void ConfigStorage_Initialise()
     size_t total = 0, used = 0;
     ret = esp_littlefs_info(LITTLEFS_PARTITION_LABEL, &total, &used);
 
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+    if (ret != ESP_OK)
+    {
+        ProductOta_FailBoot(ret);
+    }
+#endif
     if (ret == ESP_OK)
     {
         ESP_LOGI(TAG, "NANO: littlefs partition size: total: %d, used: %d", total, used);

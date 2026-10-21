@@ -42,7 +42,7 @@ endif()
 
 #################################################################################
 # WHEN CHANGING THIS MAKE SURE TO UPDATE:                                       #
-# 1. the github tags in dev containers SRC                                      #     
+# 1. the github tags in dev containers SRC                                      #
 # 2. ref in AZDO pipeline yaml (main, nightly build and Community Targets repo) #
 # 3. cache tag in build and download AZDO yaml templates                        #
 #################################################################################
@@ -134,6 +134,10 @@ endif()
 set(NF_SECURITY_MBEDTLS ON CACHE INTERNAL "MbedTLS must be ON for IDF build")
 
 # add platform dirs
+if(NF_FEATURE_PRODUCT_OTA)
+    include(NF_ProductOta)
+endif()
+
 add_subdirectory(_common)
 add_subdirectory(_include)
 add_subdirectory(_nanoCLR)
@@ -141,4 +145,4 @@ add_subdirectory(_nanoCLR)
 if(USE_NETWORKING_OPTION)
     add_subdirectory(_Network)
 endif()
- 
+

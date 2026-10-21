@@ -59,6 +59,11 @@ list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/esp_system/incl
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/esp_wifi/include)
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/esp_wifi/include/local)
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/esp_partition/include)
+if(NF_FEATURE_PRODUCT_OTA)
+    list(APPEND ESP32_IDF_INCLUDE_DIRS
+        ${IDF_PATH_CMAKED}/components/app_update/include
+        ${IDF_PATH_CMAKED}/components/bootloader_support/include)
+endif()
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/esp_pm/include)
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/fatfs/diskio)
 list(APPEND ESP32_IDF_INCLUDE_DIRS ${IDF_PATH_CMAKED}/components/fatfs/vfs)

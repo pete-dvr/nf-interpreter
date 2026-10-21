@@ -9,6 +9,10 @@
 #include <WireProtocol_ReceiverThread.h>
 #include <LaunchCLR.h>
 #include <string.h>
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+#include <ProductFirmwareUpdate.h>
+#include <targetHAL_ConfigStorage.h>
+#endif
 
 extern void CLRStartupThread(void const *argument);
 TaskHandle_t ReceiverTask;
@@ -52,6 +56,23 @@ int dummyLog(const char *format, va_list arg)
 // Called from Esp32 IDF start up code before scheduler starts
 void app_main()
 {
+#if CONFIG_NF_FEATURE_PRODUCT_OTA
+    // The native deadline starts before configuration, networking or CLR startup.
+    esp_err_t otaResult = ProductOta_Initialize();
+    if (otaResult != ESP_OK)
+    {
+        ProductOta_FailBoot(otaResult);
+    }
+    // nanoHAL_Initialize validates the pair before every CLR deployment scan,
+    // including the initial boot and subsequent CLR-only reboots.
+    otaResult = nvs_flash_init();
+    if (otaResult != ESP_OK)
+    {
+        // Never erase field NVS to recover initialization errors.
+        ProductOta_FailBoot(otaResult);
+    }
+    ConfigStorage_Initialise();
+#endif
     // Switch off logging so as not to interfere with WireProtocol over Uart0
     esp_log_level_set("*", ESP_LOG_NONE);
 
@@ -59,7 +80,9 @@ void app_main()
     // TODO : redirect these to debugger controlled from nanoframework.Hardware.Esp32
     esp_log_set_vprintf(dummyLog);
 
+#if !CONFIG_NF_FEATURE_PRODUCT_OTA
     ESP_ERROR_CHECK(nvs_flash_init());
+#endif
 
     // start receiver task
     xTaskCreatePinnedToCore(&receiver_task, "ReceiverThread", 3072, NULL, 5, &ReceiverTask, 0);
