@@ -7,8 +7,10 @@
 #include "ProductOtaPackage.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <esp_flash_partitions.h>
 #include <esp_heap_caps.h>
 #include <esp_littlefs.h>
@@ -398,7 +400,7 @@ esp_err_t VerifySignature(const uint8_t header[128], const uint8_t signature[64]
 
 struct InstallContext
 {
-    FILE *file;
+    int file;
     uint8_t *buffer;
     esp_ota_handle_t handle;
     Header header;
@@ -406,7 +408,7 @@ struct InstallContext
     uint8_t signature[64];
     uint32_t expectedCrc;
 
-    InstallContext() : file(NULL), buffer(NULL), handle(0), expectedCrc(0)
+    InstallContext() : file(-1), buffer(NULL), handle(0), expectedCrc(0)
     {
     }
 
@@ -426,11 +428,13 @@ struct InstallContext
                 }
             }
         }
-        if (file != NULL)
+        if (file >= 0)
         {
-            FILE *owned = file;
-            file = NULL;
-            if (fclose(owned) != 0)
+            const int owned = file;
+            file = -1;
+            // Do not retry close after EINTR: the descriptor may already have
+            // been released and reused by another task.
+            if (close(owned) != 0)
             {
                 esp_err_t error = Failure(PRODUCT_OTA_ERR_IO, "package-close", errno);
                 if (priorError == ESP_OK)
@@ -448,29 +452,58 @@ struct InstallContext
     }
 };
 
-esp_err_t ReadExact(FILE *file, uint8_t *buffer, size_t length)
+ssize_t ReadSome(int file, uint8_t *buffer, size_t length)
 {
-    if (fread(buffer, 1, length, file) != length)
+    ssize_t count;
+    do
     {
-        return Failure(PRODUCT_OTA_ERR_IO, "package-short-read", ferror(file) ? errno : ESP_ERR_INVALID_SIZE);
+        count = read(file, buffer, length);
+    } while (count < 0 && errno == EINTR);
+    return count;
+}
+
+esp_err_t ReadExact(int file, uint8_t *buffer, size_t length)
+{
+    while (length != 0)
+    {
+        // Use the VFS directly. Size-optimized newlib fread on an _IONBF file
+        // otherwise refills its one-byte buffer once per byte, turning each
+        // package pass into millions of filesystem calls.
+        const size_t chunk = length < BufferSize ? length : BufferSize;
+        const ssize_t count = ReadSome(file, buffer, chunk);
+        if (count <= 0)
+        {
+            return Failure(PRODUCT_OTA_ERR_IO, "package-short-read", count < 0 ? errno : ESP_ERR_INVALID_SIZE);
+        }
+        buffer += count;
+        length -= static_cast<size_t>(count);
     }
     return ESP_OK;
 }
 
-esp_err_t Seek(FILE *file, uint32_t offset)
+esp_err_t Seek(int file, uint32_t offset)
 {
-    clearerr(file);
-    return fseek(file, static_cast<long>(offset), SEEK_SET) == 0
+    off_t position;
+    do
+    {
+        position = lseek(file, static_cast<off_t>(offset), SEEK_SET);
+    } while (position < 0 && errno == EINTR);
+    return position == static_cast<off_t>(offset)
                ? ESP_OK
-               : Failure(PRODUCT_OTA_ERR_IO, "package-seek", errno);
+               : Failure(PRODUCT_OTA_ERR_IO, "package-seek", position < 0 ? errno : ESP_ERR_INVALID_SIZE);
 }
 
 esp_err_t ValidateFile(InstallContext &context, bool firstPass)
 {
     struct stat info;
-    if (fstat(fileno(context.file), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < HeaderLength)
+    int status;
+    do
     {
-        return Failure(PRODUCT_OTA_ERR_IO, "package-stat", errno);
+        status = fstat(context.file, &info);
+    } while (status < 0 && errno == EINTR);
+    if (status != 0 || !S_ISREG(info.st_mode) || info.st_size < HeaderLength)
+    {
+        return Failure(PRODUCT_OTA_ERR_IO, "package-stat", status != 0 ? errno : ESP_ERR_INVALID_SIZE);
     }
     esp_err_t error = Seek(context.file, 0);
     if (error != ESP_OK)
@@ -552,9 +585,11 @@ esp_err_t ValidateFile(InstallContext &context, bool firstPass)
             memcpy(context.signature, signature, sizeof(signature));
         }
     }
-    if (fgetc(context.file) != EOF || ferror(context.file))
+    uint8_t trailing;
+    const ssize_t trailingCount = ReadSome(context.file, &trailing, sizeof(trailing));
+    if (trailingCount != 0)
     {
-        return Failure(PRODUCT_OTA_ERR_IO, "package-trailing-data", errno);
+        return Failure(PRODUCT_OTA_ERR_IO, "package-trailing-data", trailingCount < 0 ? errno : ESP_ERR_INVALID_SIZE);
     }
     if ((crc ^ UINT32_MAX) != context.expectedCrc)
     {
@@ -696,15 +731,13 @@ esp_err_t Install(InstallContext &context, const Operation &operation)
     {
         return Failure(PRODUCT_OTA_ERR_SPACE, "filesystem-reserve", error);
     }
-    context.file = fopen(operation.path, "rb");
-    if (context.file == NULL)
+    do
+    {
+        context.file = open(operation.path, O_RDONLY);
+    } while (context.file < 0 && errno == EINTR);
+    if (context.file < 0)
     {
         return Failure(PRODUCT_OTA_ERR_IO, "package-open", errno);
-    }
-    // Keep a single explicitly bounded I/O buffer; do not allocate a stdio buffer.
-    if (setvbuf(context.file, NULL, _IONBF, 0) != 0)
-    {
-        return Failure(PRODUCT_OTA_ERR_IO, "package-buffering", errno);
     }
     error = ValidateFile(context, true);
     if (error != ESP_OK)

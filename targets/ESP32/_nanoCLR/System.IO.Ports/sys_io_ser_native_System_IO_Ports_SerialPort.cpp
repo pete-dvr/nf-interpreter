@@ -69,15 +69,59 @@ NF_PAL_UART *GetPalUartFromUartNum_sys(int uart_num)
     return NULL;
 }
 
-void UninitializePalUart_sys(NF_PAL_UART *palUart)
+// HAL_RingBuffer is not a single-producer/single-consumer lock-free buffer: both
+// Push and Pop change its size, and Pop can reset both indices when empty.
+static size_t GetRxBufferLength(NF_PAL_UART *palUart)
 {
-    if (palUart && palUart->UartEventTask)
+    GLOBAL_LOCK();
+    size_t length = palUart->RxRingBuffer.Length();
+    GLOBAL_UNLOCK();
+    return length;
+}
+
+static size_t ReadRxBuffer(NF_PAL_UART *palUart, uint8_t *data, size_t count)
+{
+    GLOBAL_LOCK();
+    size_t available = palUart->RxRingBuffer.Length();
+    size_t read = palUart->RxRingBuffer.Pop(data, count > available ? available : count);
+    GLOBAL_UNLOCK();
+    return read;
+}
+
+bool UninitializePalUart_sys(NF_PAL_UART *palUart)
+{
+    if (palUart && palUart->RxBuffer)
     {
-        // send the exit signal to the UART event handling queue
-        uart_event_t event;
-        event.type = UART_EVENT_MAX;
-        xQueueSend(palUart->UartEventQueue, &event, 0);
-        palUart->UartEventTask = NULL;
+        GLOBAL_LOCK();
+        bool receiverRunning = palUart->UartEventTask != NULL;
+        GLOBAL_UNLOCK();
+        if (receiverRunning)
+        {
+            // Stop ahead of queued RX events, but never free storage still used by
+            // the receiver. A full queue or a slow task must not make Close/Open
+            // reuse the PAL while the previous receiver is still running.
+            uart_event_t event = {};
+            event.type = UART_EVENT_MAX;
+            if (xQueueSendToFront(palUart->UartEventQueue, &event, pdMS_TO_TICKS(100)) != pdTRUE)
+            {
+                ESP_LOGE(TAG, "Failed to request UART receiver stop");
+                return false;
+            }
+            TickType_t started = xTaskGetTickCount();
+            do
+            {
+                vTaskDelay(1);
+                GLOBAL_LOCK();
+                receiverRunning = palUart->UartEventTask != NULL;
+                GLOBAL_UNLOCK();
+            } while (receiverRunning && (xTaskGetTickCount() - started) < pdMS_TO_TICKS(1000));
+
+            if (receiverRunning)
+            {
+                ESP_LOGE(TAG, "Timed out stopping UART receiver");
+                return false;
+            }
+        }
 
         // delete the TX worker task and its semaphore
         if (palUart->TxWorkerTask != NULL)
@@ -102,8 +146,13 @@ void UninitializePalUart_sys(NF_PAL_UART *palUart)
         palUart->TxBuffer = NULL;
 
         // delete driver
-        uart_driver_delete((uart_port_t)palUart->UartNum);
+        if (uart_is_driver_installed(palUart->UartNum))
+        {
+            uart_driver_delete((uart_port_t)palUart->UartNum);
+        }
+        palUart->UartEventQueue = NULL;
     }
+    return true;
 }
 
 void Esp32_Serial_UninitializeAll_sys()
@@ -191,35 +240,43 @@ void uart_event_task_sys(void *pvParameters)
                         // try to read RX FIFO
                         readCount = uart_read_bytes(palUart->UartNum, buffer, bufferedSize, portMAX_DELAY);
 
-                        // push to UART RX buffer
-                        palUart->RxRingBuffer.Push(buffer, readCount);
-
-                        // is there a read operation going on?
-                        if (palUart->RxBytesToRead > 0)
+                        // Share the same lock as every managed reader. Keep event
+                        // dispatch and line scanning outside the critical section.
+                        bool readPending;
+                        bool signalRead = false;
+                        bool signalData;
+                        uint8_t newLineChar;
+                        GLOBAL_LOCK();
+                        if (readCount > 0)
                         {
-                            // yes
-                            // check if the requested bytes are available in the buffer...
-                            //... or if the watch char was received
-                            if ((palUart->RxRingBuffer.Length() >= palUart->RxBytesToRead) || (watchCharPos > -1))
-                            {
-                                // reset Rx bytes to read count
-                                palUart->RxBytesToRead = 0;
-
-                                // fire event for Rx buffer complete
-                                Events_Set(SYSTEM_EVENT_FLAG_COM_IN);
-                            }
+                            palUart->RxRingBuffer.Push(buffer, readCount);
                         }
-                        else
+                        size_t buffered = palUart->RxRingBuffer.Length();
+                        readPending = palUart->RxBytesToRead > 0;
+                        if (readPending && ((buffered >= palUart->RxBytesToRead) || (watchCharPos > -1)))
+                        {
+                            palUart->RxBytesToRead = 0;
+                            signalRead = true;
+                        }
+                        signalData = buffered >= palUart->ReceivedBytesThreshold;
+                        newLineChar = palUart->NewLineChar;
+                        GLOBAL_UNLOCK();
+
+                        if (signalRead)
+                        {
+                            Events_Set(SYSTEM_EVENT_FLAG_COM_IN);
+                        }
+                        if (!readPending)
                         {
                             // no synchronous read pending: wake up a blocked ReadLine(), if the new line char
                             // was received in this chunk
-                            if (palUart->NewLineChar > 0 && readCount > 0)
+                            if (newLineChar > 0 && readCount > 0)
                             {
                                 int32_t newLineSearchIndex = readCount;
 
                                 do
                                 {
-                                    if (buffer[newLineSearchIndex - 1] == palUart->NewLineChar)
+                                    if (buffer[newLineSearchIndex - 1] == newLineChar)
                                     {
                                         // fire event for new line char found
                                         Events_Set(SYSTEM_EVENT_FLAG_COM_IN);
@@ -227,11 +284,11 @@ void uart_event_task_sys(void *pvParameters)
                                         // done here
                                         break;
                                     }
-                                } while (--newLineSearchIndex >= 0);
+                                } while (--newLineSearchIndex > 0);
                             }
 
                             // fire an event for DataReceived, if the available bytes are at/above the threshold
-                            if (palUart->RxRingBuffer.Length() >= palUart->ReceivedBytesThreshold)
+                            if (signalData)
                             {
                                 // post a managed event with the port index and event code (check if there is a
                                 // watch char in the buffer or just any char)
@@ -253,6 +310,11 @@ void uart_event_task_sys(void *pvParameters)
         }
     }
 
+    // Acknowledge only after the last access to the RX storage/driver. After
+    // releasing this lock, Close/Open may free/reuse the PAL immediately.
+    GLOBAL_LOCK();
+    palUart->UartEventTask = NULL;
+    GLOBAL_UNLOCK();
     vTaskDelete(NULL);
 }
 
@@ -302,7 +364,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::get_BytesToRead___
     }
 
     // return how many bytes can be read from the Rx buffer
-    stack.SetResult_U4(palUart->RxRingBuffer.Length());
+    stack.SetResult_U4(GetRxBufferLength(palUart));
 
     NANOCLR_NOCLEANUP();
 }
@@ -449,6 +511,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::Read___I4__SZARRAY
     }
 
     // figure out what's available in the Rx ring buffer
+    GLOBAL_LOCK();
     if (palUart->RxRingBuffer.Length() >= count)
     {
         // read from Rx ring buffer
@@ -474,6 +537,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::Read___I4__SZARRAY
             bytesToRead = 0;
         }
     }
+    GLOBAL_UNLOCK();
 
     while (eventResult)
     {
@@ -509,7 +573,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::Read___I4__SZARRAY
     if (bytesToRead > 0)
     {
         // pop the requested bytes from the ring buffer
-        bytesRead = palUart->RxRingBuffer.Pop(data, bytesToRead);
+        bytesRead = ReadRxBuffer(palUart, data, bytesToRead);
     }
 
     // pop "hbTimeout" heap block from stack
@@ -552,7 +616,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::ReadExisting___STR
         NANOCLR_SET_AND_LEAVE(CLR_E_INVALID_PARAMETER);
     }
 
-    bufferLength = palUart->RxRingBuffer.Length();
+    bufferLength = GetRxBufferLength(palUart);
 
     if (bufferLength)
     {
@@ -567,7 +631,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::ReadExisting___STR
         }
 
         // fill data buffer from Rx buffer
-        palUart->RxRingBuffer.Pop(buffer, bufferLength);
+        bufferLength = ReadRxBuffer(palUart, buffer, bufferLength);
 
         NANOCLR_CHECK_HRESULT(CLR_RT_HeapBlock_String::CreateInstance(top, (const char *)buffer, bufferLength));
     }
@@ -654,7 +718,9 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::ReadLine___STRING(
             // set new line char as the last one in the string
             // only if this one is found it will have a chance of the others being there
             // need to subtract one because we are 0 indexed
+            GLOBAL_LOCK();
             palUart->NewLineChar = newLine[newLineLength - 1];
+            GLOBAL_UNLOCK();
 
             stack.m_customState = 2;
         }
@@ -864,7 +930,10 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::NativeDispose___VO
     // Get Uart number for serial device
     uart_num = (uart_port_t)PORT_INDEX_TO_UART_NUM(pThis[FIELD___portIndex].NumericByRef().s4);
 
-    UninitializePalUart_sys(GetPalUartFromUartNum_sys(uart_num));
+    if (!UninitializePalUart_sys(GetPalUartFromUartNum_sys(uart_num)))
+    {
+        NANOCLR_SET_AND_LEAVE(CLR_E_TIMEOUT);
+    }
 
     NANOCLR_NOCLEANUP();
 }
@@ -910,7 +979,10 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::NativeInit___VOID(
     // Open/Close/Open without dispose
     if (uart_is_driver_installed(uart_num))
     {
-        UninitializePalUart_sys(palUart);
+        if (!UninitializePalUart_sys(palUart))
+        {
+            NANOCLR_SET_AND_LEAVE(CLR_E_TIMEOUT);
+        }
     }
 
     // call the configure and abort if not OK
@@ -1453,6 +1525,7 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::NativeReceivedByte
     NF_PAL_UART *palUart;
     int32_t threshold;
     uart_port_t uart_num;
+    bool signalData;
 
     // get a pointer to the managed object instance and check that it's not NULL
     CLR_RT_HeapBlock *pThis = stack.This();
@@ -1480,11 +1553,15 @@ HRESULT Library_sys_io_ser_native_System_IO_Ports_SerialPort::NativeReceivedByte
     pThis[FIELD___receivedBytesThreshold].NumericByRef().s4 = threshold;
 
     // update threshold value
+    GLOBAL_LOCK();
     palUart->ReceivedBytesThreshold = threshold;
+    signalData = pThis[FIELD___opened].NumericByRef().u1
+                 && (uint32_t)threshold <= palUart->RxRingBuffer.Length();
+    GLOBAL_UNLOCK();
 
     // fake call to event handler in case port is open and the new threshold was set
     // to a value lower than the bytes that are already available
-    if (pThis[FIELD___opened].NumericByRef().u1 && (uint32_t)threshold <= palUart->RxRingBuffer.Length())
+    if (signalData)
     {
         PostManagedEvent(EVENT_SERIAL, 0, UART_NUM_TO_PORT_INDEX(palUart->UartNum), SerialData_Chars);
     }

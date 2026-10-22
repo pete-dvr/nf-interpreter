@@ -32,6 +32,7 @@ MANAGED_LIMIT = 0x2E0000
 FLASH_SIZE = 0x1000000
 UINT32_MAX = 0xFFFFFFFF
 IO_CHUNK = 65536
+NATIVE_DESCRIPTOR_LENGTH = 72
 
 PARTITIONS = (
     ("nvs", "data", "nvs", 0x9000, 0x6000),
@@ -217,6 +218,33 @@ def hash_payload(source: BinaryIO, length: int) -> bytes:
     return digest.digest()
 
 
+def verify_runtime_descriptor(runtime: bytes, header: Header) -> None:
+    """Bind the package to the descriptor the native runtime uses at boot.
+
+    ProductReleaseDescriptor is 72 bytes on ESP32: target[16], uint32 layout,
+    release[16], uint32 managed length, SHA256[32]. Its existing target/layout
+    prefix identifies the constant without changing the package/image format.
+    Ambiguous images are rejected instead of choosing a convenient descriptor.
+    """
+    marker = identifier_bytes(header.target_id, "targetId") + struct.pack("<I", header.layout_id)
+    offset = runtime.find(marker)
+    if offset < 0:
+        raise PackageError("native release descriptor missing or incompatible targetId/layoutId; rebuild the native image")
+    if runtime.find(marker, offset + 1) >= 0:
+        raise PackageError("ambiguous native release descriptors: targetId/layoutId occurs more than once")
+    if offset + NATIVE_DESCRIPTOR_LENGTH > len(runtime):
+        raise PackageError("truncated native release descriptor")
+    release = decode_identifier(runtime[offset + 20:offset + 36], "native release descriptor releaseId")
+    if release != header.release_id:
+        raise PackageError(f"native release descriptor releaseId {release!r} does not match package releaseId "
+                           f"{header.release_id!r}; rebuild the native image for this release")
+    managed_length = struct.unpack_from("<I", runtime, offset + 36)[0]
+    if managed_length != header.managed_length:
+        raise PackageError("native release descriptor managedLength does not match the managed payload; rebuild the native image")
+    if runtime[offset + 40:offset + 72] != header.managed_sha256:
+        raise PackageError("native release descriptor managed SHA256 does not match the managed payload; rebuild the native image")
+
+
 def verify_package(path: Path, public_key=None, *, allow_unsigned: bool = False, expected_crc: int | None = None) -> dict:
     identity = file_identity(path)
     if expected_crc is not None and int(identity["crc32"], 16) != expected_crc:
@@ -234,6 +262,8 @@ def verify_package(path: Path, public_key=None, *, allow_unsigned: bool = False,
             verify_signature(raw_header, source.read(SIGNATURE_LENGTH), public_key)
         if source.read(1):
             raise PackageError("unexpected trailing bytes")
+        source.seek(HEADER_LENGTH)
+        verify_runtime_descriptor(source.read(header.runtime_length), header)
     # A second identity also detects most accidental concurrent changes between
     # the CRC pass and parse pass. Release inputs must remain immutable.
     if file_identity(path) != identity:
@@ -266,11 +296,14 @@ def build_package(runtime: Path, managed: Path, release_id: str, output: Path, p
     native = file_identity(runtime, NATIVE_LIMIT, "native image")
     application = file_identity(managed, MANAGED_LIMIT, "managed image")
     signed = private_key is not None
-    header = Header(
+    fields = Header(
         int(signed), HEADER_LENGTH + native["length"] + application["length"] + (SIGNATURE_LENGTH if signed else 0),
         native["length"], application["length"], LAYOUT_ID, TARGET_ID, release_id,
         bytes.fromhex(native["sha256"]), bytes.fromhex(application["sha256"]),
-    ).encode()
+    )
+    with runtime.open("rb") as source:
+        verify_runtime_descriptor(source.read(NATIVE_LIMIT + 1), fields)
+    header = fields.encode()
     signature = sign_header(header, private_key) if signed else b""
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = None

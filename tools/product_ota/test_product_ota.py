@@ -28,8 +28,9 @@ class PackageTests(unittest.TestCase):
         self.managed = self.root / "application.bin"
         self.output = self.root / "update.bin"
         # Include every separator and bytes that are not valid text.
-        self.runtime.write_bytes(b"\xE9" + bytes(range(256)) * 17)
         self.managed.write_bytes(b"MSSpot1\0" + bytes(reversed(range(256))) * 7)
+        self.descriptor_offset = 1 + 256 * 17
+        self.runtime.write_bytes(b"\xE9" + bytes(range(256)) * 17 + self.descriptor())
 
     def tearDown(self):
         self.temp.cleanup()
@@ -37,6 +38,21 @@ class PackageTests(unittest.TestCase):
     def build(self, signed=True):
         return ota.build_package(self.runtime, self.managed, "v1.2.3", self.output,
                                  self.key if signed else None, allow_unsigned=not signed)
+
+    def descriptor(self, release="v1.2.3"):
+        # Serialize the actual C struct independently of the package builder.
+        return struct.pack("<16sI16sI32s", ota.TARGET_ID.encode(), 2, release.encode(),
+                           self.managed.stat().st_size, hashlib.sha256(self.managed.read_bytes()).digest())
+
+    def write_external_package(self, runtime, signed):
+        # Model a package made elsewhere: all outer hashes/signature are valid,
+        # so descriptor disagreement must be caught by verification itself.
+        managed = self.managed.read_bytes()
+        header = ota.Header(int(signed), 128 + len(runtime) + len(managed) + (64 if signed else 0),
+                            len(runtime), len(managed), 2, ota.TARGET_ID, "v1.2.3",
+                            hashlib.sha256(runtime).digest(), hashlib.sha256(managed).digest()).encode()
+        signature = ota.sign_header(header, self.key) if signed else b""
+        self.output.write_bytes(header + runtime + managed + signature)
 
     def mutate(self, offset, data):
         package = bytearray(self.output.read_bytes())
@@ -197,6 +213,65 @@ class PackageTests(unittest.TestCase):
         with self.assertRaises(ota.PackageError):
             ota.generate_descriptor(self.managed, "x" * 17, self.root / "generated.cpp", self.key.public_key())
 
+    def test_packaging_cannot_rename_an_existing_native_release(self):
+        self.output.write_bytes(b"existing release artifact")
+        with self.assertRaisesRegex(ota.PackageError, "native release descriptor releaseId.*v1.2.3.*v1.2.4"):
+            ota.build_package(self.runtime, self.managed, "v1.2.4", self.output, self.key)
+        self.assertEqual(self.output.read_bytes(), b"existing release artifact")
+        self.assertFalse(self.output.with_name("update.bin.manifest.json").exists())
+        self.assertEqual(list(self.root.glob("update.bin.*.tmp")), [])
+
+    def test_descriptor_disagreement_rejected_when_packaging_and_verifying(self):
+        original = self.runtime.read_bytes()
+        changes = (
+            (0, b"WRONG-TARGET\0\0\0\0", "targetId/layoutId"),
+            (16, struct.pack("<I", 1), "targetId/layoutId"),
+            (20, b"older-release".ljust(16, b"\0"), "releaseId"),
+            (20, b"bad\0padding".ljust(16, b"\0"), "releaseId"),
+            (36, struct.pack("<I", self.managed.stat().st_size - 1), "managedLength"),
+            (40, bytes([original[self.descriptor_offset + 40] ^ 1]), "managed SHA256"),
+        )
+        for offset, replacement, message in changes:
+            for signed in (False, True):
+                with self.subTest(field=message, offset=offset, signed=signed):
+                    runtime = bytearray(original)
+                    start = self.descriptor_offset + offset
+                    runtime[start:start + len(replacement)] = replacement
+                    self.runtime.write_bytes(runtime)
+                    with self.assertRaisesRegex(ota.PackageError, message):
+                        self.build(signed)
+                    self.write_external_package(runtime, signed)
+                    with self.assertRaisesRegex(ota.PackageError, message):
+                        self.verify(allow_unsigned=not signed)
+
+    def test_descriptor_missing_truncated_and_ambiguous_rejected(self):
+        original = self.runtime.read_bytes()
+        bad_images = (
+            (original[:self.descriptor_offset], "descriptor missing"),
+            (original[:-1], "truncated native release descriptor"),
+            (original + self.descriptor(), "ambiguous native release descriptors"),
+            (original + self.descriptor("older-release"), "ambiguous native release descriptors"),
+        )
+        for runtime, message in bad_images:
+            with self.subTest(message=message):
+                self.runtime.write_bytes(runtime)
+                with self.assertRaisesRegex(ota.PackageError, message):
+                    self.build()
+                self.write_external_package(runtime, True)
+                with self.assertRaisesRegex(ota.PackageError, message):
+                    self.verify()
+
+    def test_changed_managed_image_requires_matching_native_rebuild(self):
+        application = self.managed.read_bytes()
+        for replacement, message in ((application + b"extra assembly", "managedLength"),
+                                      (bytes([application[0] ^ 1]) + application[1:], "managed SHA256")):
+            with self.subTest(message=message):
+                self.managed.write_bytes(replacement)
+                with self.assertRaisesRegex(ota.PackageError, message):
+                    self.build()
+        self.runtime.write_bytes(self.runtime.read_bytes()[:self.descriptor_offset] + self.descriptor())
+        self.assertEqual(self.build()["managed"]["sha256"], hashlib.sha256(replacement).hexdigest())
+
     def test_partition_layout_exact_and_corruption(self):
         path = self.root / "partitions.csv"
         rows = ["# Name,Type,SubType,Offset,Size"]
@@ -221,7 +296,7 @@ class PackageTests(unittest.TestCase):
             "fork_commit", "idf_tag", "idf_commit", "build_container", "compiler_version",
             "managed_packages", "bootloader_sha256", "partition_table_sha256",
         )}
-        report = ota.build_package(self.runtime, self.managed, "v1", self.output, self.key, provenance=metadata)
+        report = ota.build_package(self.runtime, self.managed, "v1.2.3", self.output, self.key, provenance=metadata)
         self.assertTrue(report["provenance_complete"])
         self.assertEqual(report["provenance"], metadata)
 

@@ -1,5 +1,6 @@
 #include "fake_sdk.h"
 #include <assert.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,14 +11,23 @@
 #include <string>
 #include <vector>
 
-static FILE *TestFopen(const char *, const char *);
-static int TestFclose(FILE *);
-#define fopen TestFopen
-#define fclose TestFclose
+static int TestOpen(const char *, int);
+static int TestClose(int);
+static ssize_t TestRead(int, void *, size_t);
+static off_t TestSeek(int, off_t, int);
+static int TestStat(int, struct stat *);
+#define open TestOpen
+#define close TestClose
+#define read TestRead
+#define lseek TestSeek
+#define fstat TestStat
 // Execute the implementation, including its private worker and commit path.
 #include "../../../targets/ESP32/_common/ProductFirmwareUpdate.cpp"
-#undef fclose
-#undef fopen
+#undef fstat
+#undef lseek
+#undef read
+#undef close
+#undef open
 #include "ProductFirmwareErrorMap.h"
 
 const ProductReleaseDescriptor g_ProductReleaseDescriptor = {
@@ -93,6 +103,21 @@ int restartCalls;
 int confirmCalls;
 int rejectCalls;
 int closeCalls;
+int liveFiles;
+int openError;
+int closeError;
+int seekError;
+int statError;
+int openInterrupts;
+int readInterrupts;
+int seekInterrupts;
+int statInterrupts;
+int readCalls;
+int failReadCall;
+int eofReadCall;
+bool failReadAtEof;
+size_t readLimit;
+size_t maximumReadRequest;
 size_t nativeOffset;
 int64_t now;
 TaskHandle_t currentTask;
@@ -293,19 +318,77 @@ void fake_log(const char *, const char *format, ...)
     Fake::logs.push_back(message);
 }
 
-static FILE *TestFopen(const char *path, const char *mode)
+static int TestOpen(const char *path, int flags)
 {
     assert(strcmp(path, "/I/updates/update.bin") == 0);
-    return fopen(Fake::packagePath.c_str(), mode);
+    assert(flags == O_RDONLY);
+    if (Fake::openInterrupts > 0)
+    {
+        --Fake::openInterrupts;
+        errno = EINTR;
+        return -1;
+    }
+    if (Fake::openError) { errno = Fake::openError; return -1; }
+    int file = open(Fake::packagePath.c_str(), flags);
+    if (file >= 0) ++Fake::liveFiles;
+    return file;
 }
-static int TestFclose(FILE *file)
+static int TestClose(int file)
 {
+    assert(Fake::liveFiles == 1);
     ++Fake::closeCalls;
-    int result = fclose(file);
+    int result = close(file);
+    --Fake::liveFiles;
     // Injection at the final cleanup/activation boundary. The actual installer
     // must re-read cancellation under its commit lock after closing the file.
     if (Fake::cancelOnClose) s_operation.cancel = true;
+    if (Fake::closeError) { errno = Fake::closeError; return -1; }
     return result;
+}
+static ssize_t TestRead(int file, void *buffer, size_t length)
+{
+    assert(Fake::liveFiles == 1 && length > 0 && length <= 4096);
+    ++Fake::readCalls;
+    Fake::maximumReadRequest = std::max(Fake::maximumReadRequest, length);
+    if (Fake::readInterrupts > 0)
+    {
+        --Fake::readInterrupts;
+        errno = EINTR;
+        return -1;
+    }
+    if (Fake::readCalls == Fake::failReadCall ||
+        (Fake::failReadAtEof && lseek(file, 0, SEEK_CUR) == static_cast<off_t>(Fake::package.size())))
+    {
+        errno = EIO;
+        return -1;
+    }
+    if (Fake::readCalls == Fake::eofReadCall) return 0;
+    if (Fake::readLimit > 0) length = std::min(length, Fake::readLimit);
+    return read(file, buffer, length);
+}
+static off_t TestSeek(int file, off_t offset, int origin)
+{
+    assert(Fake::liveFiles == 1);
+    if (Fake::seekInterrupts > 0)
+    {
+        --Fake::seekInterrupts;
+        errno = EINTR;
+        return -1;
+    }
+    if (Fake::seekError) { errno = Fake::seekError; return -1; }
+    return lseek(file, offset, origin);
+}
+static int TestStat(int file, struct stat *info)
+{
+    assert(Fake::liveFiles == 1);
+    if (Fake::statInterrupts > 0)
+    {
+        --Fake::statInterrupts;
+        errno = EINTR;
+        return -1;
+    }
+    if (Fake::statError) { errno = Fake::statError; return -1; }
+    return fstat(file, info);
 }
 static void Put32(std::vector<uint8_t> &bytes, size_t offset, uint32_t value)
 {
@@ -323,9 +406,26 @@ static void SavePackage()
     assert(fwrite(Fake::package.data(), 1, Fake::package.size(), file) == Fake::package.size());
     assert(fclose(file) == 0);
 }
+static void MakePackage(size_t nativeLength, size_t managedLength)
+{
+    Fake::package.assign(128 + nativeLength + managedLength, 0);
+    memcpy(Fake::package.data(), "PRDOTA01", 8);
+    Fake::package[8] = 1; Fake::package[10] = 128;
+    Put32(Fake::package, 16, Fake::package.size());
+    Put32(Fake::package, 20, nativeLength);
+    Put32(Fake::package, 24, managedLength);
+    Put32(Fake::package, 28, 2);
+    memcpy(&Fake::package[32], ProductOtaPackage::TargetId, 16);
+    memcpy(&Fake::package[48], "candidate", 9);
+    memset(&Fake::package[128], 0xe9, nativeLength);
+    memset(&Fake::package[128 + nativeLength], 0x6d, managedLength);
+    Hash(&Fake::package[128], nativeLength, &Fake::package[64]);
+    Hash(&Fake::package[128 + nativeLength], managedLength, &Fake::package[96]);
+    SavePackage();
+}
 static void Reset(bool initialize = true)
 {
-    assert(Fake::liveAllocations == 0 && !Fake::liveHandle && Fake::lockDepth == 0);
+    assert(Fake::liveAllocations == 0 && !Fake::liveHandle && Fake::lockDepth == 0 && Fake::liveFiles == 0);
     ++Fake::scenarios;
     Fake::bootIndex = Fake::runningIndex = 2;
     Fake::states[0] = Fake::states[1] = ESP_OTA_IMG_VALID;
@@ -340,6 +440,11 @@ static void Reset(bool initialize = true)
     Fake::nativeWrites = Fake::managedWrites = Fake::erases = Fake::metadataWrites = 0;
     Fake::beginCalls = Fake::endCalls = Fake::abortCalls = Fake::selectionCalls = 0;
     Fake::restartCalls = Fake::confirmCalls = Fake::rejectCalls = Fake::closeCalls = 0;
+    Fake::openError = Fake::closeError = Fake::seekError = Fake::statError = 0;
+    Fake::openInterrupts = Fake::readInterrupts = Fake::seekInterrupts = Fake::statInterrupts = 0;
+    Fake::readCalls = Fake::failReadCall = Fake::eofReadCall = 0;
+    Fake::failReadAtEof = false;
+    Fake::readLimit = Fake::maximumReadRequest = 0;
     Fake::now = 1000000;
     Fake::currentTask = reinterpret_cast<TaskHandle_t>(99);
     Fake::tasksCreated = 0;
@@ -357,23 +462,9 @@ static void Reset(bool initialize = true)
         record.crc = esp_rom_crc32_le(UINT32_MAX, reinterpret_cast<uint8_t *>(&record.ota_seq), 4);
         memcpy(&Fake::flash[0x910000 + sector * 4096], &record, sizeof(record));
     }
-    const size_t nativeLength = 8192, managedLength = 257;
-    Fake::package.assign(128 + nativeLength + managedLength, 0);
-    memcpy(Fake::package.data(), "PRDOTA01", 8);
-    Fake::package[8] = 1; Fake::package[10] = 128;
-    Put32(Fake::package, 16, Fake::package.size());
-    Put32(Fake::package, 20, nativeLength);
-    Put32(Fake::package, 24, managedLength);
-    Put32(Fake::package, 28, 2);
-    memcpy(&Fake::package[32], ProductOtaPackage::TargetId, 16);
-    memcpy(&Fake::package[48], "candidate", 9);
-    memset(&Fake::package[128], 0xe9, nativeLength);
-    memset(&Fake::package[128 + nativeLength], 0x6d, managedLength);
-    Hash(&Fake::package[128], nativeLength, &Fake::package[64]);
-    Hash(&Fake::package[128 + nativeLength], managedLength, &Fake::package[96]);
+    MakePackage(8192, 257);
     Fake::filesystemTotal = 0x6EE000;
     Fake::filesystemUsed = Fake::package.size() + 4096;
-    SavePackage();
     if (initialize)
     {
         assert(ProductOta_Initialize() == ESP_OK);
@@ -404,7 +495,7 @@ static esp_err_t FailedResult(uint32_t token)
     assert(Fake::selectionCalls == 0 && Fake::restartCalls == 0);
     assert(Fake::bootIndex == Fake::runningIndex);
     assert(std::equal(originalActive.begin(), originalActive.end(), Fake::flash.begin() + 0x350000));
-    assert(!Fake::liveHandle && Fake::liveAllocations == 0);
+    assert(!Fake::liveHandle && Fake::liveAllocations == 0 && Fake::liveFiles == 0);
     ProductOta_ReleaseInstall(token);
     assert(!s_operation.active);
     return result;
@@ -415,7 +506,7 @@ static void ExpectRestart()
     try { RunWorker(); } catch (const Fake::Restart &) { restarted = true; }
     assert(restarted && Fake::restartCalls == 1 && Fake::selectionCalls == 1);
     assert(Fake::restartInsideLock && s_activationAttempted);
-    assert(Fake::liveAllocations == 0 && !Fake::liveHandle);
+    assert(Fake::liveAllocations == 0 && !Fake::liveHandle && Fake::liveFiles == 0);
     assert(Fake::closeCalls == 1);
 }
 
@@ -543,6 +634,26 @@ int main()
         assert(Fake::nativeWrites == 0 && Fake::managedWrites == 0 && Fake::erases == 0);
     }
 
+    // POSIX I/O failures still fail closed before an inactive write. The signed
+    // envelope reaches payload reads under both signature policies; its fake
+    // crypto is irrelevant because these injected failures happen first.
+    for (unsigned fault = 0; fault < 5; ++fault)
+    {
+        Reset();
+        Fake::package.resize(Fake::package.size() + 64, 0);
+        Put32(Fake::package, 12, 1);
+        Put32(Fake::package, 16, Fake::package.size());
+        SavePackage();
+        if (fault == 0) Fake::openError = EIO;
+        if (fault == 1) Fake::statError = EIO;
+        if (fault == 2) Fake::seekError = EIO;
+        if (fault == 3) Fake::failReadCall = 2;
+        if (fault == 4) Fake::eofReadCall = 2;
+        assert(FailedResult(Start()) == PRODUCT_OTA_ERR_IO);
+        assert(Fake::metadataWrites == 0 && Fake::beginCalls == 0 && Fake::erases == 0);
+        assert(Fake::closeCalls == (fault == 0 ? 0 : 1));
+    }
+
     if (RequireSignature)
     {
         // Exercise the real production policy branch independently of the
@@ -567,6 +678,45 @@ int main()
         printf("Product OTA actual-engine signature_required=1 vs_deploy=%u passed: %u scenarios; HRESULT map passed\n",
                static_cast<unsigned>(AllowVsDeploy), Fake::scenarios);
         return 0;
+    }
+
+    // A representative full-size transaction must issue block reads, not a
+    // stdio refill for each byte. All three package passes retain their hashes
+    // and exact byte content. The wrapper enforces the 4096-byte upper bound.
+    Reset();
+    const size_t largeNative = 1400000, largeManaged = 313276;
+    MakePackage(largeNative, largeManaged);
+    Fake::filesystemUsed = Fake::package.size() + 4096;
+    (void)Start(); ExpectRestart();
+    const size_t payloadReads = (largeNative + 4095) / 4096 + (largeManaged + 4095) / 4096;
+    assert(Fake::readCalls == static_cast<int>(3 * payloadReads + 4));
+    assert(Fake::maximumReadRequest == 4096);
+    assert(memcmp(&Fake::flash[0x1B0000], &Fake::package[128], largeNative) == 0);
+    assert(memcmp(&Fake::flash[0x630000], &Fake::package[128 + largeNative], largeManaged) == 0);
+
+    // Interrupted operations and positive short reads must resume at the exact
+    // byte offset without skipping or duplicating any data.
+    Reset();
+    Fake::openInterrupts = Fake::statInterrupts = Fake::seekInterrupts = Fake::readInterrupts = 2;
+    Fake::readLimit = 31;
+    (void)Start(); ExpectRestart();
+    assert(Fake::openInterrupts == 0 && Fake::statInterrupts == 0);
+    assert(Fake::seekInterrupts == 0 && Fake::readInterrupts == 0);
+    assert(memcmp(&Fake::flash[0x1B0000], &Fake::package[128], 8192) == 0);
+    assert(memcmp(&Fake::flash[0x630000], &Fake::package[128 + 8192], 257) == 0);
+
+    Reset(); Fake::failReadAtEof = true;
+    assert(FailedResult(Start()) == PRODUCT_OTA_ERR_IO);
+    assert(Fake::beginCalls == 0 && Fake::closeCalls == 1);
+
+    // A final close failure, including EINTR, forbids activation and must never
+    // close a possibly reused descriptor a second time during worker cleanup.
+    for (int error : {EIO, EINTR})
+    {
+        Reset(); Fake::closeError = error;
+        assert(FailedResult(Start()) == PRODUCT_OTA_ERR_IO);
+        assert(Fake::nativeWrites > 0 && Fake::managedWrites > 0);
+        assert(Fake::closeCalls == 1);
     }
 
     // Each SDK fault executes the real public start -> worker -> cleanup -> poll

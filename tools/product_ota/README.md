@@ -93,7 +93,9 @@ python -m pip install -r tools/product_ota/requirements.txt
    sign the native image first and recheck the size of the final signed image.
    Do not substitute a different native image after packaging.
 4. Package the final binaries. The release ID must match the descriptor used
-   for the native build:
+   for the native build. Packaging and verification check the embedded descriptor's
+   target, layout, release, managed length and managed hash against the package.
+   Rebuild the companion runtime when these inputs change:
 
    ```sh
    python tools/product_ota/product_ota.py check-runtime \
@@ -121,6 +123,14 @@ python -m pip install -r tools/product_ota/requirements.txt
 Every managed-only release must rebuild its native companion. The descriptor
 contains the managed image hash and length; the outer package contains hashes
 of both final payloads. There is no circular hash dependency.
+
+The native installer reads the staged package through bounded 4096-byte VFS
+reads. Unbuffered `fread` is unsuitable for the size-optimized ESP32 C library:
+it can refill a one-byte stdio buffer for every byte, making installation take
+minutes. Direct reads retain the fixed memory bound, both validation passes,
+payload readback, and all signature/hash checks. The update that first installs
+this improvement still runs the previously installed runtime's installer;
+subsequent updates use the improved path.
 
 `provenance.json` is an object. Record at least `fork_commit`, `idf_tag`,
 `idf_commit`, `build_container`, `compiler_version`, `managed_packages`,
@@ -180,6 +190,15 @@ Use an already confirmed slot for interactive debugging. An unconfirmed OTA
 trial still has a 60-second deadline and its watchdog; pausing it or deploying
 with a soft restart can cause rollback. This flag does not enable Secure Boot.
 
+For an OTA test, stop debugging, close Visual Studio, and reset the board once
+so the existing application runs independently. Keep Visual Studio closed until
+the new application has confirmed its boot and registered its new build. An
+attached debugger can request StopOnBoot after the OTA restart: the CLR prints
+`Ready.` but waits before running `Main`, so the application cannot confirm and
+the native deadline rolls it back. A passive serial terminal can capture output
+during this test without sending debugger commands. Reattach Visual Studio
+after confirmation for normal deployment and debugging.
+
 For a strict release build, use a separate build directory and omit the flag
 or pass `-DNF_PRODUCT_OTA_ALLOW_VS_DEPLOY=OFF`, then rebuild and install a matching
 native/managed pair. Reconfiguring the host alone does not change firmware
@@ -209,6 +228,24 @@ page count. Use model `Seadragon-S3`, retain its existing version/build fields,
 and do not send the Linux install ZIP as an ESP32 update. These legacy OTA
 frames are not protected by the normal command HMAC; production package
 signatures provide firmware authenticity.
+
+The managed receiver retains installation outcomes through reboot. It reports
+the confirmed version/build and installation timestamp in Register only after
+local boot confirmation and matching the expected native slot and descriptor.
+A repeated request for a confirmed package receives Completed/Ok without
+reinstalling. Failed or rolled-back attempts have a persistent retry budget;
+the server records outcomes and reconciles registration before retrying.
+Deploy the matching SeadragonS3 and MeterMacsCore changes together. The existing
+wire messages are unchanged, including compatibility with Linux clients.
+
+For the cellular binary-receive recovery fix, rebuild the native runtime as well
+as the managed application. The ESP32 UART receive event task and managed reads
+now serialize access to their shared ring buffer, and close waits for the receive
+worker to stop before freeing its memory. This fixes a software source of lost or
+duplicated UART bytes that can break a counted modem response. A Visual Studio
+managed-only deployment cannot replace that native UART implementation. Keep
+`NF_PRODUCT_OTA_ALLOW_VS_DEPLOY=ON` in the rebuilt development runtime to retain
+USB deployment; Secure Boot configuration is unchanged.
 
 ## Provisioning and layout migration
 

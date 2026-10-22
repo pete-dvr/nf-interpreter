@@ -25,6 +25,15 @@ SDK boundaries use deterministic fakes:
   lock was held.
 - Owned OTA handles and internal-RAM buffers are tracked. Begin can return an
   error after assigning a handle; End consumes its handle even on error.
+- Package file descriptors are tracked through the real VFS-style
+  `open`/`read`/`lseek`/`fstat`/`close` path. A 1.7 MiB package transaction must use
+  block reads bounded at 4096 bytes, including both complete validation passes
+  and payload programming. This prevents the size-optimized newlib `_IONBF`
+  `fread` regression that refilled a one-byte stdio buffer for every byte.
+  Interrupted operations and short reads preserve exact payload bytes;
+  open/stat/seek/read errors, premature EOF, EOF-check errors and close failures
+  prevent activation. A close error, including `EINTR`, is never retried against
+  a descriptor another task could have reused.
 - Actual `ProductFirmwareErrorMap.h` and actual CLR HRESULT constants test all
   product error codes, representative positive SDK errors and unknown errors.
 
