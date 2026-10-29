@@ -13,6 +13,15 @@
 #include <nanoCLR_Runtime.h>
 #include <nanoPackStruct.h>
 
+struct Library_Product_Firmware_Product_Firmware_DeviceTelemetry
+{
+    NANOCLR_NATIVE_DECLARE(GetInternalTemperatureCelsius___STATIC__R4);
+    NANOCLR_NATIVE_DECLARE(GetPowerStatus___STATIC__I4);
+    NANOCLR_NATIVE_DECLARE(AcknowledgePowerStatus___STATIC__VOID);
+
+    //--//
+};
+
 struct Library_Product_Firmware_Product_Firmware_FirmwareUpdate
 {
     NANOCLR_NATIVE_DECLARE(InstallFromFile___STATIC__VOID__STRING__U4);

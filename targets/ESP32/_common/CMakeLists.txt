@@ -7,6 +7,8 @@
 if(NF_FEATURE_PRODUCT_OTA)
     list(APPEND TARGET_ESP32_IDF_COMMON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/ProductFirmwareUpdate.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ProductDeviceTelemetry.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ProductPowerStatus.cpp
         ${NF_PRODUCT_RELEASE_SOURCE})
 endif()
 

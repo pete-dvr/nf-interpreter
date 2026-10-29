@@ -12,6 +12,9 @@
 
 static const CLR_RT_MethodHandler method_lookup[] =
 {
+    Library_Product_Firmware_Product_Firmware_DeviceTelemetry::GetInternalTemperatureCelsius___STATIC__R4,
+    Library_Product_Firmware_Product_Firmware_DeviceTelemetry::GetPowerStatus___STATIC__I4,
+    Library_Product_Firmware_Product_Firmware_DeviceTelemetry::AcknowledgePowerStatus___STATIC__VOID,
     Library_Product_Firmware_Product_Firmware_FirmwareUpdate::InstallFromFile___STATIC__VOID__STRING__U4,
     Library_Product_Firmware_Product_Firmware_FirmwareUpdate::IsTrialBoot___STATIC__BOOLEAN,
     Library_Product_Firmware_Product_Firmware_FirmwareUpdate::ConfirmBoot___STATIC__VOID,
@@ -23,9 +26,9 @@ static const CLR_RT_MethodHandler method_lookup[] =
 const CLR_RT_NativeAssemblyData g_CLR_AssemblyNative_Product_Firmware =
 {
     "Product.Firmware",
-    0xDCFAD239,
+    0xAE9CBE59,
     method_lookup,
-    { 1, 0, 0, 0 }
+    { 1, 2, 0, 0 }
 };
 
 // clang-format on

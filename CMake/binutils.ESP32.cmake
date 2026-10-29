@@ -715,8 +715,8 @@ macro(nf_add_idf_as_library)
     )
 
     if(NF_FEATURE_PRODUCT_OTA)
-        list(APPEND IDF_COMPONENTS_TO_ADD app_update bootloader_support)
-        list(APPEND IDF_LIBRARIES_TO_ADD idf::app_update idf::bootloader_support)
+        list(APPEND IDF_COMPONENTS_TO_ADD app_update bootloader_support esp_driver_tsens)
+        list(APPEND IDF_LIBRARIES_TO_ADD idf::app_update idf::bootloader_support idf::esp_driver_tsens)
     endif()
 
     # Needed for remote Wifi module on P4 boards
@@ -918,6 +918,7 @@ macro(nf_add_idf_as_library)
             "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y"
             "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y"
             "CONFIG_SPIRAM_MODE_OCT=y"
+            "CONFIG_SPIRAM_ECC_ENABLE=y"
             "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"targets/ESP32/_IDF/esp32s3/partitions_product_ota_16mb.csv\"")
             if(NOT _required IN_LIST _product_sdkconfig)
                 message(FATAL_ERROR "Product SDK configuration mismatch: ${_required}. Use a clean product build.")

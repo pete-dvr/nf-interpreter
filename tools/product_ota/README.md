@@ -20,6 +20,52 @@ Use the ESP32-S3-WROOM-1U-N16R8: 16 MiB Quad flash and 8 MiB Octal PSRAM. The
 CDC wire protocol, and uses a separate build directory and SDK defaults.
 The OCTAL name describes PSRAM; octal flash must remain disabled.
 
+Both Octal PSRAM defaults enable `CONFIG_SPIRAM_ECC_ENABLE=y`. For this N16R8
+module, Espressif specifies a maximum ambient temperature of 85 degrees C with
+PSRAM ECC enabled, instead of 65 degrees C without it (see the
+[module datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf)).
+ECC reserves 1/16 of the 8 MiB PSRAM, leaving 7.5 MiB before runtime allocations;
+the managed heap automatically uses the available capacity. The rest of the
+board must also be rated for its operating temperature.
+
+An existing ESP-IDF `sdkconfig` retains saved settings over new defaults. When
+upgrading an existing build, enable `CONFIG_SPIRAM_ECC_ENABLE=y` in that saved
+configuration. The product build uses `<build-directory>/sdkconfig`, so a fresh
+product build directory also applies the new defaults. Stock `ESP32_S3_OCTAL`
+builds use the repository-root `sdkconfig`, even with a new build directory.
+Product configuration rejects a saved configuration with ECC disabled.
+Rebuild the native runtime and its signed OTA package to apply this change;
+deploying only managed code from Visual Studio cannot enable ECC.
+
+`Product.Firmware` 1.2.0.0 exposes
+`float DeviceTelemetry.GetInternalTemperatureCelsius()` for the ESP32-S3's
+internal temperature sensor. This reports silicon temperature in degrees C,
+not the module's ambient temperature rating. The driver automatically switches
+its measurement range; the native helper serializes reads and throws a managed
+exception on a sensor error. SeadragonS3 sends each successful reading in the
+existing HardwareStatus Float32 field. A failed reading is logged and that
+status response sends `0` for temperature while preserving its other fields;
+the next request retries the sensor normally.
+
+`int DeviceTelemetry.GetPowerStatus()` returns `1` for OK or `2` for a pending
+voltage dropout. At hardware boot, after NVS initialization and before CLR
+startup, the runtime latches `ESP_RST_BROWNOUT` in the `product_power` NVS
+namespace. Normal resets preserve pending events. Reading does not consume
+the event. `void DeviceTelemetry.AcknowledgePowerStatus()` clears it only after
+the managed client successfully transmits the report; storage errors throw
+and are retried. Native initialization survives managed soft restarts, so an
+acknowledged brownout is not relatched by Visual Studio deployment.
+
+This reports resets identified by the ESP32 brownout detector; an abrupt full
+power loss that is subsequently reported as `ESP_RST_POWERON` cannot be
+distinguished from an ordinary power-on by reset cause alone. See Espressif's
+[reset reason API](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/api-reference/system/misc_system_api.html#reset-reason).
+
+The added telemetry methods change the interop contract to checksum
+`0xAE9CBE59`. Install its matching native/managed pair through OTA before
+deploying applications using the new contract from Visual Studio. Older OTA
+slots retain their own matching application and runtime for rollback.
+
 This implementation rejects encrypted partitions, including flash-encrypted
 application partitions. Flash encryption needs a separate provisioning and
 aligned-write implementation before it can be enabled. Package signing remains

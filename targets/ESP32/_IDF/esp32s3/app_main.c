@@ -11,6 +11,7 @@
 #include <string.h>
 #if CONFIG_NF_FEATURE_PRODUCT_OTA
 #include <ProductFirmwareUpdate.h>
+#include <ProductDeviceTelemetry.h>
 #include <targetHAL_ConfigStorage.h>
 #endif
 
@@ -70,6 +71,13 @@ void app_main()
     {
         // Never erase field NVS to recover initialization errors.
         ProductOta_FailBoot(otaResult);
+    }
+    // Capture the hardware reset cause before managed code or network startup.
+    // Telemetry failures must not prevent boot; managed calls retry storage.
+    esp_err_t powerStatusResult = ProductTelemetry_InitializePowerStatus();
+    if (powerStatusResult != ESP_OK)
+    {
+        ESP_LOGE("product_power", "Cannot persist reset cause: %s", esp_err_to_name(powerStatusResult));
     }
     ConfigStorage_Initialise();
 #endif

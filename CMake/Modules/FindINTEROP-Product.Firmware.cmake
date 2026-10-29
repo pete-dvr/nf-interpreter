@@ -12,6 +12,7 @@ set(Product.Firmware_INCLUDE_DIRS
     "${CMAKE_SOURCE_DIR}/targets/ESP32/_include")
 set(Product.Firmware_SOURCES
     "${CMAKE_SOURCE_DIR}/targets/ESP32/_nanoCLR/Product.Firmware/Product_Firmware.cpp"
+    "${CMAKE_SOURCE_DIR}/targets/ESP32/_nanoCLR/Product.Firmware/Product_Firmware_DeviceTelemetry.cpp"
     "${CMAKE_SOURCE_DIR}/targets/ESP32/_nanoCLR/Product.Firmware/Product_Firmware_Update.cpp")
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(INTEROP-Product.Firmware DEFAULT_MSG
