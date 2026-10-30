@@ -37,7 +37,7 @@ Product configuration rejects a saved configuration with ECC disabled.
 Rebuild the native runtime and its signed OTA package to apply this change;
 deploying only managed code from Visual Studio cannot enable ECC.
 
-`Product.Firmware` 1.2.0.0 exposes
+`Product.Firmware` 1.3.0.0 exposes
 `float DeviceTelemetry.GetInternalTemperatureCelsius()` for the ESP32-S3's
 internal temperature sensor. This reports silicon temperature in degrees C,
 not the module's ambient temperature rating. The driver automatically switches
@@ -61,8 +61,16 @@ power loss that is subsequently reported as `ESP_RST_POWERON` cannot be
 distinguished from an ordinary power-on by reset cause alone. See Espressif's
 [reset reason API](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/api-reference/system/misc_system_api.html#reset-reason).
 
-The added telemetry methods change the interop contract to checksum
-`0xAE9CBE59`. Install its matching native/managed pair through OTA before
+`byte[] DeviceTelemetry.GetFactoryMacAddress()` returns the 6-byte MAC that
+Espressif burns into eFuse at manufacture (`esp_read_mac` with
+`ESP_MAC_EFUSE_FACTORY`), the address esptool prints when flashing. It throws
+if the eFuse read fails. SeadragonS3 uses it as the device ID
+when `I:\deviceid.dat` does not exist, so a mass-erased board comes back with
+the same ID. A saved ID always wins, so OTA does not change the ID of a device
+already in the field.
+
+The added telemetry and identity methods change the interop contract to
+version 1.3.0.0, checksum `0xE3A0CBDF`. Install its matching native/managed pair through OTA before
 deploying applications using the new contract from Visual Studio. Older OTA
 slots retain their own matching application and runtime for rollback.
 

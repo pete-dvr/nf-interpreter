@@ -18,6 +18,7 @@ struct Library_Product_Firmware_Product_Firmware_DeviceTelemetry
     NANOCLR_NATIVE_DECLARE(GetInternalTemperatureCelsius___STATIC__R4);
     NANOCLR_NATIVE_DECLARE(GetPowerStatus___STATIC__I4);
     NANOCLR_NATIVE_DECLARE(AcknowledgePowerStatus___STATIC__VOID);
+    NANOCLR_NATIVE_DECLARE(GetFactoryMacAddress___STATIC__SZARRAY_U1);
 
     //--//
 };

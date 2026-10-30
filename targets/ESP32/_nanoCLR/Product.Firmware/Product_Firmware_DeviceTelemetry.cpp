@@ -6,7 +6,9 @@
 #include "Product_Firmware.h"
 #include <ProductDeviceTelemetry.h>
 #include <corlib_native.h>
+#include <esp_mac.h>
 #include <stdio.h>
+#include <string.h>
 
 static HRESULT TelemetryException(CLR_RT_StackFrame &stack, esp_err_t error, const char *operation)
 {
@@ -64,4 +66,25 @@ HRESULT Library_Product_Firmware_Product_Firmware_DeviceTelemetry::AcknowledgePo
     CLR_RT_StackFrame &stack)
 {
     return TelemetryException(stack, ProductTelemetry_AcknowledgePowerStatus(), "power status acknowledgment");
+}
+
+HRESULT Library_Product_Firmware_Product_Firmware_DeviceTelemetry::GetFactoryMacAddress___STATIC__SZARRAY_U1(
+    CLR_RT_StackFrame &stack)
+{
+    // The MAC Espressif burns into eFuse at manufacture (the one esptool prints when flashing).
+    uint8_t mac[6];
+    const esp_err_t error = esp_read_mac(mac, ESP_MAC_EFUSE_FACTORY);
+    if (error != ESP_OK)
+    {
+        return TelemetryException(stack, error, "factory MAC read");
+    }
+
+    CLR_RT_HeapBlock &result = stack.PushValueAndClear();
+    const HRESULT hr = CLR_RT_HeapBlock_Array::CreateInstance(result, sizeof(mac), g_CLR_RT_WellKnownTypes.m_UInt8);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    memcpy(result.DereferenceArray()->GetFirstElement(), mac, sizeof(mac));
+    return S_OK;
 }
