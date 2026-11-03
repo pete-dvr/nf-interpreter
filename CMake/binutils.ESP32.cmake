@@ -918,6 +918,7 @@ macro(nf_add_idf_as_library)
             "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y"
             "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y"
             "CONFIG_SPIRAM_MODE_OCT=y"
+            "CONFIG_SPIRAM_SPEED_80M=y"
             "CONFIG_SPIRAM_ECC_ENABLE=y"
             "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"targets/ESP32/_IDF/esp32s3/partitions_product_ota_16mb.csv\"")
             if(NOT _required IN_LIST _product_sdkconfig)

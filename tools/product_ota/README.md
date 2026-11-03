@@ -20,7 +20,8 @@ Use the ESP32-S3-WROOM-1U-N16R8: 16 MiB Quad flash and 8 MiB Octal PSRAM. The
 CDC wire protocol, and uses a separate build directory and SDK defaults.
 The OCTAL name describes PSRAM; octal flash must remain disabled.
 
-Both Octal PSRAM defaults enable `CONFIG_SPIRAM_ECC_ENABLE=y`. For this N16R8
+Both Octal PSRAM defaults select `CONFIG_SPIRAM_SPEED_80M=y` and enable
+`CONFIG_SPIRAM_ECC_ENABLE=y`. Flash remains at 80 MHz. For this N16R8
 module, Espressif specifies a maximum ambient temperature of 85 degrees C with
 PSRAM ECC enabled, instead of 65 degrees C without it (see the
 [module datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf)).
@@ -29,13 +30,15 @@ the managed heap automatically uses the available capacity. The rest of the
 board must also be rated for its operating temperature.
 
 An existing ESP-IDF `sdkconfig` retains saved settings over new defaults. When
-upgrading an existing build, enable `CONFIG_SPIRAM_ECC_ENABLE=y` in that saved
-configuration. The product build uses `<build-directory>/sdkconfig`, so a fresh
+upgrading an existing build, select 80 MHz PSRAM (`CONFIG_SPIRAM_SPEED_80M=y`)
+and keep `CONFIG_SPIRAM_ECC_ENABLE=y` in that saved configuration. The product
+build uses `<build-directory>/sdkconfig`, so a fresh
 product build directory also applies the new defaults. Stock `ESP32_S3_OCTAL`
 builds use the repository-root `sdkconfig`, even with a new build directory.
-Product configuration rejects a saved configuration with ECC disabled.
+Product configuration rejects a saved configuration with ECC disabled or PSRAM
+still at 40 MHz. Build-guide checks should expect `CONFIG_SPIRAM_SPEED_80M=y`.
 Rebuild the native runtime and its signed OTA package to apply this change;
-deploying only managed code from Visual Studio cannot enable ECC.
+deploying only managed code from Visual Studio cannot change PSRAM speed or ECC.
 
 `Product.Firmware` 1.3.0.0 exposes
 `float DeviceTelemetry.GetInternalTemperatureCelsius()` for the ESP32-S3's
